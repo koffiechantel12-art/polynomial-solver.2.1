@@ -158,8 +158,8 @@ def is_password_expired(password_last_changed):
 
 
 def hash_pw(pw):
- 
     return hashlib.sha256(pw.encode('utf-8')).hexdigest()
+
 def create_user(username, password, recovery_q=None, recovery_a=None, phone=None):
     if _use_supabase():
         sb = _supabase()
@@ -388,7 +388,7 @@ def delete_user(username):
         response = sb.table("users").delete().eq("username", username).execute()
         return bool(response.data)
     conn = _conn(); c = conn.cursor()
-    c.execute("DELETE FROM users WHERE username=?", (username,)))
+    c.execute("DELETE FROM users WHERE username=?", (username,))
     changed = conn.total_changes
     conn.commit(); conn.close()
     return changed > 0
@@ -646,6 +646,7 @@ def advanced_search_users(query, mode='fuzzy', fuzzy_threshold=75, limit=200, is
         return []
     finally:
         conn.close()
+
 
 
 

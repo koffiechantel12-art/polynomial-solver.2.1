@@ -1,24 +1,43 @@
-import sqlite3, hashlib, os, re
+import sqlite3, hashlib, os, re, importlib.util
 from datetime import datetime
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "data.db")
 PASSWORD_EXPIRY_DAYS = 90
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = (
-    os.environ.get("SUPABASE_SERVICE_KEY")
-    or os.environ.get("SUPABASE_KEY")
-    or os.environ.get("SUPABASE_ANON_KEY")
-)
 _SUPABASE_CLIENT = None
+_SUPABASE_CONFIG = {"url": None, "key": None}
+
+def _supabase_config():
+    url = os.environ.get("SUPABASE_URL") or os.environ.get("NEXT_PUBLIC_SUPABASE_URL")
+    key = (
+        os.environ.get("SUPABASE_SERVICE_KEY")
+        or os.environ.get("SUPABASE_KEY")
+        or os.environ.get("SUPABASE_ANON_KEY")
+        or os.environ.get("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY")
+    )
+    if not (url and key) and importlib.util.find_spec("streamlit"):
+        import streamlit as st
+        url = url or st.secrets.get("SUPABASE_URL") or st.secrets.get("NEXT_PUBLIC_SUPABASE_URL")
+        key = (
+            key
+            or st.secrets.get("SUPABASE_SERVICE_KEY")
+            or st.secrets.get("SUPABASE_KEY")
+            or st.secrets.get("SUPABASE_ANON_KEY")
+            or st.secrets.get("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY")
+        )
+    return url, key
 
 def _use_supabase():
-    return bool(SUPABASE_URL and SUPABASE_KEY)
+    url, key = _supabase_config()
+    return bool(url and key)
 
 def _supabase():
     global _SUPABASE_CLIENT
-    if _SUPABASE_CLIENT is None:
+    url, key = _supabase_config()
+    if _SUPABASE_CLIENT is None or _SUPABASE_CONFIG["url"] != url or _SUPABASE_CONFIG["key"] != key:
         from supabase import create_client
-        _SUPABASE_CLIENT = create_client(SUPABASE_URL, SUPABASE_KEY)
+        _SUPABASE_CLIENT = create_client(url, key)
+        _SUPABASE_CONFIG["url"] = url
+        _SUPABASE_CONFIG["key"] = key
     return _SUPABASE_CLIENT
 
 def _conn():
@@ -50,7 +69,6 @@ def init_db():
         return
 
     conn = _conn(); c = conn.cursor()
-    # ensure base users table exists (minimal columns)
     # ensure base users table exists (minimal columns)
     c.execute("""CREATE TABLE IF NOT EXISTS users(
         id INTEGER PRIMARY KEY,
@@ -599,6 +617,7 @@ def advanced_search_users(query, mode='fuzzy', fuzzy_threshold=75, limit=200, is
         return []
     finally:
         conn.close()
+
 
 
 

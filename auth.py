@@ -1,13 +1,54 @@
 import sqlite3, hashlib, os, re
 from datetime import datetime
+from supabase import create_client
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "data.db")
 PASSWORD_EXPIRY_DAYS = 90
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = (
+    os.environ.get("SUPABASE_SERVICE_KEY")
+    or os.environ.get("SUPABASE_KEY")
+    or os.environ.get("SUPABASE_ANON_KEY")
+)
+_SUPABASE_CLIENT = None
+
+def _use_supabase():
+    return bool(SUPABASE_URL and SUPABASE_KEY)
+
+def _supabase():
+    global _SUPABASE_CLIENT
+    if _SUPABASE_CLIENT is None:
+        _SUPABASE_CLIENT = create_client(SUPABASE_URL, SUPABASE_KEY)
+    return _SUPABASE_CLIENT
 
 def _conn():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 def init_db():
+    if _use_supabase():
+        sb = _supabase()
+        admin_user = os.environ.get("ADMIN_USERNAME", "ad")
+        admin_pw = os.environ.get("ADMIN_PASSWORD", "ad")
+        existing = (
+            sb.table("users")
+            .select("id")
+            .eq("username", admin_user)
+            .limit(1)
+            .execute()
+        )
+        if not existing.data:
+            h = hashlib.sha256(admin_pw.encode('utf-8')).hexdigest()
+            now = datetime.utcnow().isoformat()
+            sb.table("users").insert({
+                "username": admin_user,
+                "password": h,
+                "is_admin": 1,
+                "created_at": now,
+                "password_last_changed": now,
+                "must_set_recovery": 0
+            }).execute()
+        return
+
     conn = _conn(); c = conn.cursor()
     # ensure base users table exists (minimal columns)
     c.execute("""CREATE TABLE IF NOT EXISTS users(
@@ -85,6 +126,24 @@ def hash_pw(pw):
     return hashlib.sha256(pw.encode('utf-8')).hexdigest()
 
 def create_user(username, password, recovery_q=None, recovery_a=None, phone=None):
+    if _use_supabase():
+        sb = _supabase()
+        if phone:
+            phone_check = sb.table("users").select("id").eq("phone", phone).limit(1).execute()
+            if phone_check.data:
+                return False
+        now = datetime.utcnow().isoformat()
+        response = sb.table("users").insert({
+            "username": username,
+            "password": hash_pw(password),
+            "recovery_q": recovery_q,
+            "recovery_a": hash_pw(recovery_a) if recovery_a else None,
+            "created_at": now,
+            "password_last_changed": now,
+            "must_set_recovery": 0,
+            "phone": phone
+        }).execute()
+        return bool(response.data)
     conn = _conn()
     c = conn.cursor()
     try:
@@ -122,6 +181,22 @@ def create_user(username, password, recovery_q=None, recovery_a=None, phone=None
         conn.close()
 
 def admin_create_user(username, password, phone=None):
+    if _use_supabase():
+        sb = _supabase()
+        if phone:
+            phone_check = sb.table("users").select("id").eq("phone", phone).limit(1).execute()
+            if phone_check.data:
+                return False
+        now = datetime.utcnow().isoformat()
+        response = sb.table("users").insert({
+            "username": username,
+            "password": hash_pw(password),
+            "created_at": now,
+            "password_last_changed": now,
+            "must_set_recovery": 1,
+            "phone": phone
+        }).execute()
+        return bool(response.data)
     conn = _conn()
     c = conn.cursor()
     try:
@@ -157,6 +232,23 @@ def admin_create_user(username, password, phone=None):
 
 
 def verify_user(identifier, password):
+    if _use_supabase():
+        sb = _supabase()
+        response = (
+            sb.table("users")
+            .select("username,password,is_admin,password_last_changed")
+            .or_(f"username.eq.{identifier},phone.eq.{identifier}")
+            .limit(1)
+            .execute()
+        )
+        if not response.data:
+            return None
+        row = response.data[0]
+        if row["password"] != hash_pw(password):
+            return None
+        if is_password_expired(row.get("password_last_changed")):
+            return "EXPIRED"
+        return {"username": row["username"], "is_admin": bool(row.get("is_admin"))}
     conn = _conn()
     c = conn.cursor()
 
@@ -184,6 +276,26 @@ def verify_user(identifier, password):
 
 
 def get_user(identifier):
+    if _use_supabase():
+        sb = _supabase()
+        response = (
+            sb.table("users")
+            .select("username,is_admin,recovery_q,recovery_a,must_set_recovery,phone")
+            .or_(f"username.eq.{identifier},phone.eq.{identifier}")
+            .limit(1)
+            .execute()
+        )
+        if not response.data:
+            return None
+        row = response.data[0]
+        return {
+            "username": row.get("username"),
+            "is_admin": bool(row.get("is_admin")),
+            "recovery_q": row.get("recovery_q"),
+            "recovery_a": row.get("recovery_a"),
+            "must_set_recovery": bool(row.get("must_set_recovery")),
+            "phone": row.get("phone")
+        }
     conn = _conn(); c = conn.cursor()
     c.execute("SELECT username,is_admin,recovery_q,recovery_a,must_set_recovery,phone FROM users WHERE username=? OR phone=?", (identifier, identifier))
     row = c.fetchone(); conn.close()
@@ -192,6 +304,10 @@ def get_user(identifier):
     return {"username": row[0], "is_admin": bool(row[1]), "recovery_q": row[2], "recovery_a": row[3], "must_set_recovery": bool(row[4]), "phone": row[5]}
 
 def list_users():
+    if _use_supabase():
+        sb = _supabase()
+        response = sb.table("users").select("username,is_admin").execute()
+        return [{"username": r["username"], "is_admin": bool(r.get("is_admin"))} for r in response.data or []]
     conn = _conn(); c = conn.cursor()
     c.execute("SELECT username,is_admin FROM users")
     users = [{"username": r[0], "is_admin": bool(r[1])} for r in c.fetchall()]
@@ -199,6 +315,17 @@ def list_users():
     return users
 
 def search_users(q):
+    if _use_supabase():
+        sb = _supabase()
+        response = (
+            sb.table("users")
+            .select("username,is_admin")
+            .ilike("username", f"%{q}%")
+            .order("username")
+            .limit(200)
+            .execute()
+        )
+        return [{"username": r["username"], "is_admin": bool(r.get("is_admin"))} for r in response.data or []]
     conn = _conn(); c = conn.cursor()
     c.execute("SELECT username,is_admin FROM users WHERE username LIKE ? ORDER BY username LIMIT 200", (f"%{q}%",))
     users = [{"username": r[0], "is_admin": bool(r[1])} for r in c.fetchall()]
@@ -209,6 +336,10 @@ def delete_user(username):
     # protect the admin 'ad' account
     if username == "ad":
         return False
+    if _use_supabase():
+        sb = _supabase()
+        response = sb.table("users").delete().eq("username", username).execute()
+        return bool(response.data)
     conn = _conn(); c = conn.cursor()
     c.execute("DELETE FROM users WHERE username=?", (username,))
     changed = conn.total_changes
@@ -216,6 +347,19 @@ def delete_user(username):
     return changed > 0
 
 def set_recovery(username, question, answer):
+    if _use_supabase():
+        sb = _supabase()
+        response = (
+            sb.table("users")
+            .update({
+                "recovery_q": question,
+                "recovery_a": hash_pw(answer),
+                "must_set_recovery": 0
+            })
+            .eq("username", username)
+            .execute()
+        )
+        return bool(response.data)
     conn = _conn(); c = conn.cursor()
     c.execute("UPDATE users SET recovery_q=?, recovery_a=?, must_set_recovery=0 WHERE username=?", (question, hash_pw(answer), username))
     conn.commit(); ok = c.rowcount > 0
@@ -223,6 +367,31 @@ def set_recovery(username, question, answer):
     return ok
 
 def recover_password(username, answer, new_password):
+    if _use_supabase():
+        sb = _supabase()
+        response = (
+            sb.table("users")
+            .select("recovery_a")
+            .eq("username", username)
+            .limit(1)
+            .execute()
+        )
+        if not response.data or not response.data[0].get("recovery_a"):
+            return False
+        if response.data[0]["recovery_a"] != hash_pw(answer):
+            return False
+        now = datetime.utcnow().isoformat()
+        update = (
+            sb.table("users")
+            .update({
+                "password": hash_pw(new_password),
+                "password_last_changed": now,
+                "password_expired": 0
+            })
+            .eq("username", username)
+            .execute()
+        )
+        return bool(update.data)
     conn = _conn()
     c = conn.cursor()
 
@@ -250,11 +419,27 @@ def recover_password(username, answer, new_password):
 
 
 def add_history(username, expression, roots):
+    if _use_supabase():
+        sb = _supabase()
+        sb.table("history").insert({
+            "username": username,
+            "expression": expression,
+            "roots": roots
+        }).execute()
+        return
     conn = _conn(); c = conn.cursor()
     c.execute("INSERT INTO history(username,expression,roots) VALUES(?,?,?)", (username, expression, roots))
     conn.commit(); conn.close()
 
 def get_history(username=None):
+    if _use_supabase():
+        sb = _supabase()
+        query = sb.table("history").select("id,username,expression,roots,timestamp")
+        if username:
+            query = query.eq("username", username)
+        response = query.order("timestamp", desc=True).execute()
+        rows = response.data or []
+        return [(r["id"], r["username"], r["expression"], r["roots"], r["timestamp"]) for r in rows]
     conn = _conn(); c = conn.cursor()
     if username:
         c.execute("SELECT id,username,expression,roots,timestamp FROM history WHERE username=? ORDER BY timestamp DESC", (username,))
@@ -263,11 +448,78 @@ def get_history(username=None):
     rows = c.fetchall(); conn.close()
     return rows
 
-def advanced_search_users(query, mode='fuzzy', fuzzy_threshold=75, limit=200, is_admin=None, case_sensitive=False):
+def advanced_search_users(query, mode='fuzzy', fuzzy_threshold=75, limit=200, is_admin=None, case_sensitive=False):␊
 	"""
 	mode: 'substring' | 'prefix' | 'tokens' | 'regex' | 'fuzzy'
 	Always returns list of dicts: {username, phone, is_admin, created_at, ...}
 	"""
+	if _use_supabase():
+		sb = _supabase()
+		collate_query = query if case_sensitive else query.lower()
+		base_rows = sb.table("users").select("username,phone,is_admin,created_at").execute().data or []
+		users = [{
+			"username": r.get("username"),
+			"phone": r.get("phone"),
+			"is_admin": bool(r.get("is_admin")),
+			"created_at": r.get("created_at")
+		} for r in base_rows]
+		if is_admin is not None:
+			users = [u for u in users if u["is_admin"] == bool(is_admin)]
+
+		if mode in ('substring', 'prefix', 'tokens'):
+			if mode == 'substring':
+				def match(u):
+					name = u["username"] or ""
+					phone = u["phone"] or ""
+					if case_sensitive:
+						return collate_query in name or collate_query in phone
+					return collate_query in name.lower() or collate_query in phone.lower()
+			elif mode == 'prefix':
+				def match(u):
+					name = u["username"] or ""
+					phone = u["phone"] or ""
+					if case_sensitive:
+						return name.startswith(collate_query) or phone.startswith(collate_query)
+					return name.lower().startswith(collate_query) or phone.lower().startswith(collate_query)
+			else:
+				tokens = [t for t in collate_query.split() if t]
+				def match(u):
+					name = u["username"] or ""
+					phone = u["phone"] or ""
+					name_cmp = name if case_sensitive else name.lower()
+					phone_cmp = phone if case_sensitive else phone.lower()
+					return all(t in name_cmp or t in phone_cmp for t in tokens)
+			filtered = [u for u in users if match(u)]
+			return sorted(filtered, key=lambda x: x["username"] or "")[:limit]
+
+		if mode == 'regex':
+			flags = 0 if case_sensitive else re.I
+			try:
+				prog = re.compile(query, flags)
+			except re.error:
+				return []
+			return [u for u in users if prog.search(u["username"] or "") or (u["phone"] and prog.search(u["phone"]))][:limit]
+
+		if mode == 'fuzzy':
+			try:
+				from rapidfuzz import process, fuzz
+			except Exception:
+				return [u for u in users if collate_query in (u["username"] or "").lower() or (u["phone"] and collate_query in u["phone"])][:limit]
+			choices = {u["username"]: u for u in users if u["username"]}
+			matches = process.extract(query, choices.keys(), scorer=fuzz.WRatio, score_cutoff=fuzzy_threshold, limit=limit)
+			results = []
+			for m, score, _ in matches:
+				u = choices[m]
+				u_copy = u.copy(); u_copy["score"] = score
+				results.append(u_copy)
+			if query.isdigit():
+				for u in users:
+					if u["phone"] and query in u["phone"] and u not in results:
+						u_copy = u.copy(); u_copy["score"] = 100
+						results.append(u_copy)
+			return results[:limit]
+		return []
+
 	conn = _conn(); c = conn.cursor()
 	try:
 		# simple SQL-based searches include phone
@@ -342,3 +594,4 @@ def advanced_search_users(query, mode='fuzzy', fuzzy_threshold=75, limit=200, is
 		return []
 	finally:
 		conn.close()
+

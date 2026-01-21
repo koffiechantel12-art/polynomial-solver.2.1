@@ -40,6 +40,13 @@ def _supabase():
         _SUPABASE_CONFIG["key"] = key
     return _SUPABASE_CLIENT
 
+def _supabase_insert(table, payload, fallback_payload=None):
+    sb = _supabase()
+    response = sb.table(table).insert(payload).execute()
+    if getattr(response, "error", None) and fallback_payload:
+        response = sb.table(table).insert(fallback_payload).execute()
+    return response
+
 def _conn():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
@@ -58,14 +65,20 @@ def init_db():
         if not existing.data:
             h = hashlib.sha256(admin_pw.encode('utf-8')).hexdigest()
             now = datetime.utcnow().isoformat()
-            sb.table("users").insert({
+            payload = {
                 "username": admin_user,
                 "password": h,
                 "is_admin": 1,
                 "created_at": now,
                 "password_last_changed": now,
                 "must_set_recovery": 0
-            }).execute()
+            }
+            fallback = {
+                "username": admin_user,
+                "password": h,
+                "is_admin": 1
+            }
+            _supabase_insert("users", payload, fallback)
         return
 
     conn = _conn(); c = conn.cursor()
@@ -136,10 +149,12 @@ def init_db():
 
 def is_password_expired(password_last_changed):
     if not password_last_changed:
-        return True
-    last = datetime.fromisoformat(password_last_changed)
+        return False
+    try:
+        last = datetime.fromisoformat(password_last_changed)
+    except ValueError:
+        return False
     return (datetime.utcnow() - last).days >= PASSWORD_EXPIRY_DAYS
-
 
 def hash_pw(pw):
     return hashlib.sha256(pw.encode('utf-8')).hexdigest()
@@ -617,6 +632,7 @@ def advanced_search_users(query, mode='fuzzy', fuzzy_threshold=75, limit=200, is
         return []
     finally:
         conn.close()
+
 
 
 

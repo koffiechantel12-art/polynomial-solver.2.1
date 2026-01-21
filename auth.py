@@ -448,151 +448,157 @@ def get_history(username=None):
     rows = c.fetchall(); conn.close()
     return rows
 
-def advanced_search_users(query, mode='fuzzy', fuzzy_threshold=75, limit=200, is_admin=None, case_sensitive=False):␊
-	"""
-	mode: 'substring' | 'prefix' | 'tokens' | 'regex' | 'fuzzy'
-	Always returns list of dicts: {username, phone, is_admin, created_at, ...}
-	"""
-	if _use_supabase():
-		sb = _supabase()
-		collate_query = query if case_sensitive else query.lower()
-		base_rows = sb.table("users").select("username,phone,is_admin,created_at").execute().data or []
-		users = [{
-			"username": r.get("username"),
-			"phone": r.get("phone"),
-			"is_admin": bool(r.get("is_admin")),
-			"created_at": r.get("created_at")
-		} for r in base_rows]
-		if is_admin is not None:
-			users = [u for u in users if u["is_admin"] == bool(is_admin)]
+def advanced_search_users(query, mode='fuzzy', fuzzy_threshold=75, limit=200, is_admin=None, case_sensitive=False):
+    """
+    mode: 'substring' | 'prefix' | 'tokens' | 'regex' | 'fuzzy'
+    Always returns list of dicts: {username, phone, is_admin, created_at, ...}
+    """
+    if _use_supabase():
+        sb = _supabase()
+        collate_query = query if case_sensitive else query.lower()
+        base_rows = sb.table("users").select("username,phone,is_admin,created_at").execute().data or []
+        users = [{
+            "username": r.get("username"),
+            "phone": r.get("phone"),
+            "is_admin": bool(r.get("is_admin")),
+            "created_at": r.get("created_at")
+        } for r in base_rows]
+        if is_admin is not None:
+            users = [u for u in users if u["is_admin"] == bool(is_admin)]
 
-		if mode in ('substring', 'prefix', 'tokens'):
-			if mode == 'substring':
-				def match(u):
-					name = u["username"] or ""
-					phone = u["phone"] or ""
-					if case_sensitive:
-						return collate_query in name or collate_query in phone
-					return collate_query in name.lower() or collate_query in phone.lower()
-			elif mode == 'prefix':
-				def match(u):
-					name = u["username"] or ""
-					phone = u["phone"] or ""
-					if case_sensitive:
-						return name.startswith(collate_query) or phone.startswith(collate_query)
-					return name.lower().startswith(collate_query) or phone.lower().startswith(collate_query)
-			else:
-				tokens = [t for t in collate_query.split() if t]
-				def match(u):
-					name = u["username"] or ""
-					phone = u["phone"] or ""
-					name_cmp = name if case_sensitive else name.lower()
-					phone_cmp = phone if case_sensitive else phone.lower()
-					return all(t in name_cmp or t in phone_cmp for t in tokens)
-			filtered = [u for u in users if match(u)]
-			return sorted(filtered, key=lambda x: x["username"] or "")[:limit]
+        if mode in ('substring', 'prefix', 'tokens'):
+            if mode == 'substring':
+                def match(u):
+                    name = u["username"] or ""
+                    phone = u["phone"] or ""
+                    if case_sensitive:
+                        return collate_query in name or collate_query in phone
+                    return collate_query in name.lower() or collate_query in phone.lower()
+            elif mode == 'prefix':
+                def match(u):
+                    name = u["username"] or ""
+                    phone = u["phone"] or ""
+                    if case_sensitive:
+                        return name.startswith(collate_query) or phone.startswith(collate_query)
+                    return name.lower().startswith(collate_query) or phone.lower().startswith(collate_query)
+            else:
+                tokens = [t for t in collate_query.split() if t]
+                def match(u):
+                    name = u["username"] or ""
+                    phone = u["phone"] or ""
+                    name_cmp = name if case_sensitive else name.lower()
+                    phone_cmp = phone if case_sensitive else phone.lower()
+                    return all(t in name_cmp or t in phone_cmp for t in tokens)
+            filtered = [u for u in users if match(u)]
+            return sorted(filtered, key=lambda x: x["username"] or "")[:limit]
 
-		if mode == 'regex':
-			flags = 0 if case_sensitive else re.I
-			try:
-				prog = re.compile(query, flags)
-			except re.error:
-				return []
-			return [u for u in users if prog.search(u["username"] or "") or (u["phone"] and prog.search(u["phone"]))][:limit]
+        if mode == 'regex':
+            flags = 0 if case_sensitive else re.I
+            try:
+                prog = re.compile(query, flags)
+            except re.error:
+                return []
+            return [u for u in users if prog.search(u["username"] or "") or (u["phone"] and prog.search(u["phone"]))][:limit]
 
-		if mode == 'fuzzy':
-			try:
-				from rapidfuzz import process, fuzz
-			except Exception:
-				return [u for u in users if collate_query in (u["username"] or "").lower() or (u["phone"] and collate_query in u["phone"])][:limit]
-			choices = {u["username"]: u for u in users if u["username"]}
-			matches = process.extract(query, choices.keys(), scorer=fuzz.WRatio, score_cutoff=fuzzy_threshold, limit=limit)
-			results = []
-			for m, score, _ in matches:
-				u = choices[m]
-				u_copy = u.copy(); u_copy["score"] = score
-				results.append(u_copy)
-			if query.isdigit():
-				for u in users:
-					if u["phone"] and query in u["phone"] and u not in results:
-						u_copy = u.copy(); u_copy["score"] = 100
-						results.append(u_copy)
-			return results[:limit]
-		return []
+        if mode == 'fuzzy':
+            try:
+                from rapidfuzz import process, fuzz
+            except Exception:
+                return [u for u in users if collate_query in (u["username"] or "").lower() or (u["phone"] and collate_query in u["phone"])][:limit]
+            choices = {u["username"]: u for u in users if u["username"]}
+            matches = process.extract(query, choices.keys(), scorer=fuzz.WRatio, score_cutoff=fuzzy_threshold, limit=limit)
+            results = []
+            for m, score, _ in matches:
+                u = choices[m]
+                u_copy = u.copy()
+                u_copy["score"] = score
+                results.append(u_copy)
+            if query.isdigit():
+                for u in users:
+                    if u["phone"] and query in u["phone"] and u not in results:
+                        u_copy = u.copy()
+                        u_copy["score"] = 100
+                        results.append(u_copy)
+            return results[:limit]
+        return []
 
-	conn = _conn(); c = conn.cursor()
-	try:
-		# simple SQL-based searches include phone
-		coll = '' if case_sensitive else ' COLLATE NOCASE'
-		if mode in ('substring', 'prefix', 'tokens'):
-			if mode == 'substring':
-				pattern = f"%{query}%"
-				sql = "SELECT username,phone,is_admin,created_at FROM users WHERE (username LIKE ? OR phone LIKE ?)"+coll+" ORDER BY username LIMIT ?"
-				params = [pattern, pattern, limit]
-				if is_admin is not None:
-					sql = sql.replace(" LIMIT ?", " AND is_admin=? LIMIT ?")
-					params = [pattern, pattern, 1 if is_admin else 0, limit]
-			elif mode == 'prefix':
-				pattern = f"{query}%"
-				sql = "SELECT username,phone,is_admin,created_at FROM users WHERE (username LIKE ? OR phone LIKE ?)"+coll+" ORDER BY username LIMIT ?"
-				params = [pattern, pattern, limit]
-				if is_admin is not None:
-					sql = sql.replace(" LIMIT ?", " AND is_admin=? LIMIT ?")
-					params = [pattern, pattern, 1 if is_admin else 0, limit]
-			else:  # tokens (AND all tokens in username or phone)
-				tokens = [t for t in query.split() if t]
-				clauses = " AND ".join(["(username LIKE ? OR phone LIKE ?)"+coll] * len(tokens))
-				sql = f"SELECT username,phone,is_admin,created_at FROM users WHERE {clauses}"
-				params = []
-				for t in tokens:
-					params.extend([f"%{t}%", f"%{t}%"])
-				if is_admin is not None:
-					sql += " AND is_admin=?"
-					params.append(1 if is_admin else 0)
-				sql += " ORDER BY username LIMIT ?"
-				params.append(limit)
-			c.execute(sql, params)
-			rows = c.fetchall()
-			return [{"username": r[0], "phone": r[1], "is_admin": bool(r[2]), "created_at": r[3]} for r in rows]
+    conn = _conn()
+    c = conn.cursor()
+    try:
+        # simple SQL-based searches include phone
+        coll = '' if case_sensitive else ' COLLATE NOCASE'
+        if mode in ('substring', 'prefix', 'tokens'):
+            if mode == 'substring':
+                pattern = f"%{query}%"
+                sql = "SELECT username,phone,is_admin,created_at FROM users WHERE (username LIKE ? OR phone LIKE ?)" + coll + " ORDER BY username LIMIT ?"
+                params = [pattern, pattern, limit]
+                if is_admin is not None:
+                    sql = sql.replace(" LIMIT ?", " AND is_admin=? LIMIT ?")
+                    params = [pattern, pattern, 1 if is_admin else 0, limit]
+            elif mode == 'prefix':
+                pattern = f"{query}%"
+                sql = "SELECT username,phone,is_admin,created_at FROM users WHERE (username LIKE ? OR phone LIKE ?)" + coll + " ORDER BY username LIMIT ?"
+                params = [pattern, pattern, limit]
+                if is_admin is not None:
+                    sql = sql.replace(" LIMIT ?", " AND is_admin=? LIMIT ?")
+                    params = [pattern, pattern, 1 if is_admin else 0, limit]
+            else:  # tokens (AND all tokens in username or phone)
+                tokens = [t for t in query.split() if t]
+                clauses = " AND ".join(["(username LIKE ? OR phone LIKE ?)" + coll] * len(tokens))
+                sql = f"SELECT username,phone,is_admin,created_at FROM users WHERE {clauses}"
+                params = []
+                for t in tokens:
+                    params.extend([f"%{t}%", f"%{t}%"])
+                if is_admin is not None:
+                    sql += " AND is_admin=?"
+                    params.append(1 if is_admin else 0)
+                sql += " ORDER BY username LIMIT ?"
+                params.append(limit)
+            c.execute(sql, params)
+            rows = c.fetchall()
+            return [{"username": r[0], "phone": r[1], "is_admin": bool(r[2]), "created_at": r[3]} for r in rows]
 
-		# For regex/fuzzy: fetch all users then filter in Python so we can match username or phone consistently
-		c.execute("SELECT username,phone,is_admin,created_at FROM users")
-		all_rows = c.fetchall()
-		users = [{"username": r[0], "phone": r[1], "is_admin": bool(r[2]), "created_at": r[3]} for r in all_rows]
-		if is_admin is not None:
-			users = [u for u in users if u["is_admin"] == bool(is_admin)]
+        # For regex/fuzzy: fetch all users then filter in Python so we can match username or phone consistently
+        c.execute("SELECT username,phone,is_admin,created_at FROM users")
+        all_rows = c.fetchall()
+        users = [{"username": r[0], "phone": r[1], "is_admin": bool(r[2]), "created_at": r[3]} for r in all_rows]
+        if is_admin is not None:
+            users = [u for u in users if u["is_admin"] == bool(is_admin)]
 
-		if mode == 'regex':
-			flags = 0 if case_sensitive else re.I
-			try:
-				prog = re.compile(query, flags)
-			except re.error:
-				return []
-			return [u for u in users if prog.search(u["username"] or "") or (u["phone"] and prog.search(u["phone"]))][:limit]
+        if mode == 'regex':
+            flags = 0 if case_sensitive else re.I
+            try:
+                prog = re.compile(query, flags)
+            except re.error:
+                return []
+            return [u for u in users if prog.search(u["username"] or "") or (u["phone"] and prog.search(u["phone"]))][:limit]
 
-		if mode == 'fuzzy':
-			# fuzzy on username and phone (if available); fallback to substring if rapidfuzz missing
-			try:
-				from rapidfuzz import process, fuzz
-			except Exception:
-				return [u for u in users if query.lower() in (u["username"] or "").lower() or (u["phone"] and query in u["phone"])][:limit]
-			# score usernames first
-			choices = {u["username"]: u for u in users if u["username"]}
-			matches = process.extract(query, choices.keys(), scorer=fuzz.WRatio, score_cutoff=fuzzy_threshold, limit=limit)
-			results = []
-			for m, score, _ in matches:
-				u = choices[m]
-				u_copy = u.copy(); u_copy["score"] = score
-				results.append(u_copy)
-			# also match phone substrings for digit queries (avoid duplicates)
-			if query.isdigit():
-				for u in users:
-					if u["phone"] and query in u["phone"] and u not in results:
-						u_copy = u.copy(); u_copy["score"] = 100
-						results.append(u_copy)
-			return results[:limit]
-		return []
-	finally:
-		conn.close()
+        if mode == 'fuzzy':
+            # fuzzy on username and phone (if available); fallback to substring if rapidfuzz missing
+            try:
+                from rapidfuzz import process, fuzz
+            except Exception:
+                return [u for u in users if query.lower() in (u["username"] or "").lower() or (u["phone"] and query in u["phone"])][:limit]
+            # score usernames first
+            choices = {u["username"]: u for u in users if u["username"]}
+            matches = process.extract(query, choices.keys(), scorer=fuzz.WRatio, score_cutoff=fuzzy_threshold, limit=limit)
+            results = []
+            for m, score, _ in matches:
+                u = choices[m]
+                u_copy = u.copy()
+                u_copy["score"] = score
+                results.append(u_copy)
+            # also match phone substrings for digit queries (avoid duplicates)
+            if query.isdigit():
+                for u in users:
+                    if u["phone"] and query in u["phone"] and u not in results:
+                        u_copy = u.copy()
+                        u_copy["score"] = 100
+                        results.append(u_copy)
+            return results[:limit]
+        return []
+    finally:
+        conn.close()
+
 
 

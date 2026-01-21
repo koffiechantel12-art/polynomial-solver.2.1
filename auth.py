@@ -57,13 +57,13 @@ def init_db():
         admin_pw = os.environ.get("ADMIN_PASSWORD", "ad")
         existing = (
             sb.table("users")
-            .select("id")
+            .select("id,password,is_admin")
             .eq("username", admin_user)
             .limit(1)
             .execute()
         )
+        h = hashlib.sha256(admin_pw.encode('utf-8')).hexdigest()
         if not existing.data:
-            h = hashlib.sha256(admin_pw.encode('utf-8')).hexdigest()
             now = datetime.utcnow().isoformat()
             payload = {
                 "username": admin_user,
@@ -79,6 +79,14 @@ def init_db():
                 "is_admin": 1
             }
             _supabase_insert("users", payload, fallback)
+        else:
+            row = existing.data[0]
+            needs_reset = row.get("password") != h or not bool(row.get("is_admin"))
+            if needs_reset:
+                sb.table("users").update({
+                    "password": h,
+                    "is_admin": 1
+                }).eq("username", admin_user).execute()
         return
 
     conn = _conn(); c = conn.cursor()
@@ -128,9 +136,10 @@ def init_db():
     # ensure single admin account using environment variables (secure in deployment)
     admin_user = os.environ.get("ADMIN_USERNAME", "ad")
     admin_pw = os.environ.get("ADMIN_PASSWORD", "ad")
-    c.execute("SELECT 1 FROM users WHERE username=?", (admin_user,))
-    if not c.fetchone():
-        h = hashlib.sha256(admin_pw.encode('utf-8')).hexdigest()
+    c.execute("SELECT password, is_admin FROM users WHERE username=?", (admin_user,))
+    row = c.fetchone()
+    h = hashlib.sha256(admin_pw.encode('utf-8')).hexdigest()
+    if not row:
         now = datetime.utcnow().isoformat()
         c.execute(
             """
@@ -143,6 +152,14 @@ def init_db():
             (admin_user, h, 1, now, now)
         )
         conn.commit()
+    else:
+        pw_hash, is_admin = row
+        if pw_hash != h or not bool(is_admin):
+            c.execute(
+                "UPDATE users SET password=?, is_admin=1 WHERE username=?",
+                (h, admin_user)
+            )
+            conn.commit()
 
     conn.close()
 
@@ -646,6 +663,7 @@ def advanced_search_users(query, mode='fuzzy', fuzzy_threshold=75, limit=200, is
         return []
     finally:
         conn.close()
+
 
 
 

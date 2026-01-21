@@ -1,6 +1,5 @@
 import sqlite3, hashlib, os, re
 from datetime import datetime
-from supabase import create_client
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "data.db")
 PASSWORD_EXPIRY_DAYS = 90
@@ -18,6 +17,7 @@ def _use_supabase():
 def _supabase():
     global _SUPABASE_CLIENT
     if _SUPABASE_CLIENT is None:
+        from supabase import create_client
         _SUPABASE_CLIENT = create_client(SUPABASE_URL, SUPABASE_KEY)
     return _SUPABASE_CLIENT
 
@@ -50,6 +50,7 @@ def init_db():
         return
 
     conn = _conn(); c = conn.cursor()
+    # ensure base users table exists (minimal columns)
     # ensure base users table exists (minimal columns)
     c.execute("""CREATE TABLE IF NOT EXISTS users(
         id INTEGER PRIMARY KEY,
@@ -124,7 +125,6 @@ def is_password_expired(password_last_changed):
 
 def hash_pw(pw):
     return hashlib.sha256(pw.encode('utf-8')).hexdigest()
-
 def create_user(username, password, recovery_q=None, recovery_a=None, phone=None):
     if _use_supabase():
         sb = _supabase()
@@ -594,4 +594,5 @@ def advanced_search_users(query, mode='fuzzy', fuzzy_threshold=75, limit=200, is
 		return []
 	finally:
 		conn.close()
+
 

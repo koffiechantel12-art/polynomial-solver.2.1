@@ -156,7 +156,9 @@ def is_password_expired(password_last_changed):
         return False
     return (datetime.utcnow() - last).days >= PASSWORD_EXPIRY_DAYS
 
+
 def hash_pw(pw):
+ 
     return hashlib.sha256(pw.encode('utf-8')).hexdigest()
 def create_user(username, password, recovery_q=None, recovery_a=None, phone=None):
     if _use_supabase():
@@ -166,7 +168,7 @@ def create_user(username, password, recovery_q=None, recovery_a=None, phone=None
             if phone_check.data:
                 return False
         now = datetime.utcnow().isoformat()
-        response = sb.table("users").insert({
+        payload = {
             "username": username,
             "password": hash_pw(password),
             "recovery_q": recovery_q,
@@ -175,7 +177,13 @@ def create_user(username, password, recovery_q=None, recovery_a=None, phone=None
             "password_last_changed": now,
             "must_set_recovery": 0,
             "phone": phone
-        }).execute()
+        }
+        fallback = {
+            "username": username,
+            "password": hash_pw(password),
+            "is_admin": 0
+        }
+        response = _supabase_insert("users", payload, fallback)
         return bool(response.data)
     conn = _conn()
     c = conn.cursor()
@@ -221,14 +229,20 @@ def admin_create_user(username, password, phone=None):
             if phone_check.data:
                 return False
         now = datetime.utcnow().isoformat()
-        response = sb.table("users").insert({
+        payload = {
             "username": username,
             "password": hash_pw(password),
             "created_at": now,
             "password_last_changed": now,
             "must_set_recovery": 1,
             "phone": phone
-        }).execute()
+        }
+        fallback = {
+            "username": username,
+            "password": hash_pw(password),
+            "is_admin": 1
+        }
+        response = _supabase_insert("users", payload, fallback)
         return bool(response.data)
     conn = _conn()
     c = conn.cursor()
@@ -374,7 +388,7 @@ def delete_user(username):
         response = sb.table("users").delete().eq("username", username).execute()
         return bool(response.data)
     conn = _conn(); c = conn.cursor()
-    c.execute("DELETE FROM users WHERE username=?", (username,))
+    c.execute("DELETE FROM users WHERE username=?", (username,)))
     changed = conn.total_changes
     conn.commit(); conn.close()
     return changed > 0
@@ -632,6 +646,7 @@ def advanced_search_users(query, mode='fuzzy', fuzzy_threshold=75, limit=200, is
         return []
     finally:
         conn.close()
+
 
 
 

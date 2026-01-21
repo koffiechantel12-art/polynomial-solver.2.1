@@ -3,3 +3,5 @@ numpy
 matplotlib
 pandas
 rapidfuzz
+supabase
+

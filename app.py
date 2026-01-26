@@ -1,5 +1,10 @@
+import os
+import sys
 import streamlit as st
-import sqlite3, os
+import sqlite3
+
+sys.path.append(os.path.dirname(__file__))
+
 from auth import init_db, verify_user, create_user, admin_create_user, get_user, list_users, delete_user, add_history, get_history, set_recovery, recover_password, search_users, advanced_search_users, set_role
 from solver import parse_coeffs, compute_roots, eval_poly, root_multiplicities
 from utils import plot_polynomial, fig_to_bytes, history_to_csv, poly_to_latex, complex_to_latex

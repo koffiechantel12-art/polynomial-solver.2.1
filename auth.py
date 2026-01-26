@@ -388,14 +388,15 @@ def verify_user(identifier, password):
 def get_user(identifier):
     if _use_supabase():
         sb = _supabase()
-        response = (
-            sb.table("users")
-            .select("username,is_admin,role,recovery_q,recovery_a,must_set_recovery,phone")
-            .or_(f"username.eq.{identifier},phone.eq.{identifier}")
-            .limit(1)
-            .execute()
-        )
-        if getattr(response, "error", None):
+        try:
+            response = (
+                sb.table("users")
+                .select("username,is_admin,role,recovery_q,recovery_a,must_set_recovery,phone")
+                .or_(f"username.eq.{identifier},phone.eq.{identifier}")
+                .limit(1)
+                .execute()
+            )
+        except Exception:
             response = (
                 sb.table("users")
                 .select("username,is_admin,recovery_q,recovery_a,must_set_recovery,phone")

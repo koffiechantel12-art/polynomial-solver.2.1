@@ -1,6 +1,6 @@
 import streamlit as st
 import sqlite3, os
-from auth import init_db, verify_user, create_user, admin_create_user, get_user, list_users, delete_user, add_history, get_history, set_recovery, recover_password, search_users, advanced_search_users
+from auth import init_db, verify_user, create_user, admin_create_user, get_user, list_users, delete_user, add_history, get_history, set_recovery, recover_password, search_users, advanced_search_users, set_role
 from solver import parse_coeffs, compute_roots, eval_poly, root_multiplicities
 from utils import plot_polynomial, fig_to_bytes, history_to_csv, poly_to_latex, complex_to_latex
 from ui import inject_base_css
@@ -41,28 +41,20 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-st.session_state.logout_in_progress = False
-
-
-
 def safe_rerun():
     try:
-        st.experimental_rerun()
-    except Exception:
-        pass
+        st.rerun()
+    except AttributeError:
+        try:
+            st.experimental_rerun()
+        except Exception:
+            pass
 
 # session defaults
 if 'user' not in st.session_state:
     st.session_state.user = None
 if '_view' not in st.session_state:
     st.session_state._view = None
-if "login_in_progress" not in st.session_state:
-    st.session_state.login_in_progress = False
-
-if "logout_in_progress" not in st.session_state:
-    st.session_state.logout_in_progress = False
-
-
 st.title("Polynomial Solver")
 
 # -------- Account page (landing) --------
@@ -70,15 +62,13 @@ def render_account():
     st.header("Sign In")
     username = st.text_input("Username", key="login_user")
     password = st.text_input("Password", type="password", key="login_pw")
-    if st.button("Sign In", disabled=st.session_state.login_in_progress):
-        st.session_state.login_in_progress = True
+    if st.button("Sign In"):
         result = verify_user(username, password)
 
         if result == "EXPIRED":
             st.warning("Your password has expired. Please create a new password.")
             st.session_state.user = {"username": username}
             st.session_state._view = "force_password_reset"
-            st.session_state.login_in_progress = False
             safe_rerun()
             return
 
@@ -88,15 +78,14 @@ def render_account():
             st.session_state.user = {
                 "username": detail["username"],
                 "is_admin": detail["is_admin"],
+                "role": detail.get("role", "admin" if detail.get("is_admin") else "user"),
                 "must_set_recovery": detail.get("must_set_recovery", False)
             }
-            st.session_state.login_in_progress = False
             st.session_state._view = None
             safe_rerun()
             return
 
         else:
-            st.session_state.login_in_progress = False
             st.error("Invalid credentials")
 
 
@@ -323,6 +312,10 @@ def render_admin():
             cu_name = st.text_input("New username", key="admin_new_user")
             cu_pw = st.text_input("New password", type="password", key="admin_new_pw")
             cu_phone = st.text_input("Phone (optional)", key="admin_new_phone", placeholder="+1234567890")
+            cu_role = st.selectbox("Role", ["user", "admin"], index=0, key="admin_new_role")
+            st.caption(
+                "Password must be at least 8 characters and include uppercase, lowercase, number, and special character."
+            )
             create_submit = st.form_submit_button("Create user")
         if create_submit:
             if not cu_name or not cu_pw:
@@ -330,7 +323,11 @@ def render_admin():
             elif cu_name == "ad":
                 st.error("Username reserved.")
             else:
-                ok = admin_create_user(cu_name, cu_pw, phone=cu_phone or None)
+                is_valid, msg = is_strong_password(cu_pw)
+                if not is_valid:
+                    st.error(msg)
+                    return
+                ok = admin_create_user(cu_name, cu_pw, phone=cu_phone or None, role=cu_role)
                 if ok:
                     st.success(f"User '{cu_name}' created. They must set a recovery question on first login.")
                 else:
@@ -368,8 +365,26 @@ def render_admin():
                 cols = st.columns([2,2,1,1,1])  # username, phone, role, created_at, actions
                 cols[0].write(f"**{u['username']}**")
                 cols[1].write(u.get("phone",""))
-                cols[2].write("Admin" if u.get("is_admin") else "User")
+                current_role = u.get("role") or ("admin" if u.get("is_admin") else "user")
+                role_choice = cols[2].selectbox(
+                    "Role",
+                    ["user", "admin"],
+                    index=0 if current_role == "user" else 1,
+                    key=f"role_{u['username']}",
+                    label_visibility="collapsed"
+                )
                 cols[3].write(u.get("created_at",""))
+                if cols[4].button(f"Update role", key=f"role_save_{u['username']}"):
+                    if u["username"] == "ad" and role_choice != "admin":
+                        st.warning("The 'ad' account must remain an admin.")
+                    else:
+                        ok = set_role(u["username"], role_choice)
+                        if ok:
+                            u["role"] = role_choice
+                            u["is_admin"] = role_choice == "admin"
+                            st.success(f"Updated role for {u['username']}")
+                        else:
+                            st.error("Role update failed.")
                 if cols[4].button(f"View history", key=f"hist_{u['username']}"):
                     st.session_state.admin_view_history = u['username']
                 if cols[4].button(f"Delete {u['username']}", key=f"del_{u['username']}"):
@@ -417,8 +432,7 @@ else:
         with tab3[0]:
             render_admin()
     st.markdown("---")
-    if st.button("Sign Out", disabled=st.session_state.logout_in_progress):
-        st.session_state.logout_in_progress = True
+    if st.button("Sign Out"):
         st.session_state.user = None
         st.session_state._view = None
         safe_rerun()

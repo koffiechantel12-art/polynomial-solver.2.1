@@ -47,6 +47,19 @@ def _supabase_insert(table, payload, fallback_payload=None):
         response = sb.table(table).insert(fallback_payload).execute()
     return response
 
+def _supabase_select(table, select_clause, fallback_clause=None):
+    sb = _supabase()
+    response = sb.table(table).select(select_clause).execute()
+    if getattr(response, "error", None) and fallback_clause:
+        response = sb.table(table).select(fallback_clause).execute()
+    return response
+
+def _role_from_row(row):
+    role = (row.get("role") or "").strip().lower()
+    if role:
+        return role
+    return "admin" if row.get("is_admin") else "user"
+
 def _conn():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
@@ -57,11 +70,19 @@ def init_db():
         admin_pw = os.environ.get("ADMIN_PASSWORD", "ad")
         existing = (
             sb.table("users")
-            .select("id,password,is_admin")
+            .select("id,password,is_admin,role")
             .eq("username", admin_user)
             .limit(1)
             .execute()
         )
+        if getattr(existing, "error", None):
+            existing = (
+                sb.table("users")
+                .select("id,password,is_admin")
+                .eq("username", admin_user)
+                .limit(1)
+                .execute()
+            )
         h = hashlib.sha256(admin_pw.encode('utf-8')).hexdigest()
         if not existing.data:
             now = datetime.utcnow().isoformat()
@@ -69,6 +90,7 @@ def init_db():
                 "username": admin_user,
                 "password": h,
                 "is_admin": 1,
+                "role": "admin",
                 "created_at": now,
                 "password_last_changed": now,
                 "must_set_recovery": 0
@@ -81,11 +103,12 @@ def init_db():
             _supabase_insert("users", payload, fallback)
         else:
             row = existing.data[0]
-            needs_reset = row.get("password") != h or not bool(row.get("is_admin"))
+            needs_reset = row.get("password") != h or not bool(row.get("is_admin")) or _role_from_row(row) != "admin"
             if needs_reset:
                 sb.table("users").update({
                     "password": h,
-                    "is_admin": 1
+                    "is_admin": 1,
+                    "role": "admin"
                 }).eq("username", admin_user).execute()
         return
 
@@ -125,8 +148,11 @@ def init_db():
 
     if "password_expired" not in cols:
         c.execute("ALTER TABLE users ADD COLUMN password_expired INTEGER DEFAULT 0")
-        
-    
+
+    if "role" not in cols:
+        c.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'")
+        c.execute("UPDATE users SET role='admin' WHERE is_admin=1 AND (role IS NULL OR role='')")
+
     # ensure history table exists
     c.execute("""CREATE TABLE IF NOT EXISTS history(
         id INTEGER PRIMARY KEY, username TEXT, expression TEXT, roots TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -136,7 +162,7 @@ def init_db():
     # ensure single admin account using environment variables (secure in deployment)
     admin_user = os.environ.get("ADMIN_USERNAME", "ad")
     admin_pw = os.environ.get("ADMIN_PASSWORD", "ad")
-    c.execute("SELECT password, is_admin FROM users WHERE username=?", (admin_user,))
+    c.execute("SELECT password, is_admin, role FROM users WHERE username=?", (admin_user,))
     row = c.fetchone()
     h = hashlib.sha256(admin_pw.encode('utf-8')).hexdigest()
     if not row:
@@ -144,19 +170,19 @@ def init_db():
         c.execute(
             """
             INSERT INTO users(
-                username, password, is_admin,
+                username, password, is_admin, role,
                 created_at, password_last_changed, must_set_recovery
             )
-            VALUES (?,?,?,?,?,0)
+            VALUES (?,?,?,?,?,?,0)
             """,
-            (admin_user, h, 1, now, now)
+            (admin_user, h, 1, "admin", now, now)
         )
         conn.commit()
     else:
-        pw_hash, is_admin = row
-        if pw_hash != h or not bool(is_admin):
+        pw_hash, is_admin, role = row
+        if pw_hash != h or not bool(is_admin) or (role or "").strip().lower() != "admin":
             c.execute(
-                "UPDATE users SET password=?, is_admin=1 WHERE username=?",
+                "UPDATE users SET password=?, is_admin=1, role='admin' WHERE username=?",
                 (h, admin_user)
             )
             conn.commit()
@@ -177,7 +203,7 @@ def is_password_expired(password_last_changed):
 def hash_pw(pw):
     return hashlib.sha256(pw.encode('utf-8')).hexdigest()
 
-def create_user(username, password, recovery_q=None, recovery_a=None, phone=None):
+def create_user(username, password, recovery_q=None, recovery_a=None, phone=None, role="user"):
     if _use_supabase():
         sb = _supabase()
         if phone:
@@ -185,11 +211,13 @@ def create_user(username, password, recovery_q=None, recovery_a=None, phone=None
             if phone_check.data:
                 return False
         now = datetime.utcnow().isoformat()
+        role_value = (role or "user").strip().lower()
         payload = {
             "username": username,
             "password": hash_pw(password),
             "recovery_q": recovery_q,
             "recovery_a": hash_pw(recovery_a) if recovery_a else None,
+            "role": role_value,
             "created_at": now,
             "password_last_changed": now,
             "must_set_recovery": 0,
@@ -198,7 +226,7 @@ def create_user(username, password, recovery_q=None, recovery_a=None, phone=None
         fallback = {
             "username": username,
             "password": hash_pw(password),
-            "is_admin": 0
+            "is_admin": 1 if role_value == "admin" else 0
         }
         response = _supabase_insert("users", payload, fallback)
         return bool(response.data)
@@ -212,14 +240,15 @@ def create_user(username, password, recovery_q=None, recovery_a=None, phone=None
 
         now = datetime.utcnow().isoformat()
 
+        role_value = (role or "user").strip().lower()
         c.execute("""
             INSERT INTO users(
                 username, password,
                 recovery_q, recovery_a,
                 created_at, password_last_changed,
-                must_set_recovery, phone
+                must_set_recovery, phone, role, is_admin
             )
-            VALUES (?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
         """, (
             username,
             hash_pw(password),
@@ -228,7 +257,9 @@ def create_user(username, password, recovery_q=None, recovery_a=None, phone=None
             now,
             now,
             0,
-            phone
+            phone,
+            role_value,
+            1 if role_value == "admin" else 0
         ))
 
         conn.commit()
@@ -238,7 +269,7 @@ def create_user(username, password, recovery_q=None, recovery_a=None, phone=None
     finally:
         conn.close()
 
-def admin_create_user(username, password, phone=None):
+def admin_create_user(username, password, phone=None, role="user"):
     if _use_supabase():
         sb = _supabase()
         if phone:
@@ -246,9 +277,11 @@ def admin_create_user(username, password, phone=None):
             if phone_check.data:
                 return False
         now = datetime.utcnow().isoformat()
+        role_value = (role or "user").strip().lower()
         payload = {
             "username": username,
             "password": hash_pw(password),
+            "role": role_value,
             "created_at": now,
             "password_last_changed": now,
             "must_set_recovery": 1,
@@ -257,7 +290,7 @@ def admin_create_user(username, password, phone=None):
         fallback = {
             "username": username,
             "password": hash_pw(password),
-            "is_admin": 1
+            "is_admin": 1 if role_value == "admin" else 0
         }
         response = _supabase_insert("users", payload, fallback)
         return bool(response.data)
@@ -271,20 +304,23 @@ def admin_create_user(username, password, phone=None):
 
         now = datetime.utcnow().isoformat()
 
+        role_value = (role or "user").strip().lower()
         c.execute("""
             INSERT INTO users(
                 username, password,
                 created_at, password_last_changed,
-                must_set_recovery, phone
+                must_set_recovery, phone, role, is_admin
             )
-            VALUES (?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?)
         """, (
             username,
             hash_pw(password),
             now,
             now,
             1,
-            phone
+            phone,
+            role_value,
+            1 if role_value == "admin" else 0
         ))
 
         conn.commit()
@@ -344,55 +380,74 @@ def get_user(identifier):
         sb = _supabase()
         response = (
             sb.table("users")
-            .select("username,is_admin,recovery_q,recovery_a,must_set_recovery,phone")
+            .select("username,is_admin,role,recovery_q,recovery_a,must_set_recovery,phone")
             .or_(f"username.eq.{identifier},phone.eq.{identifier}")
             .limit(1)
             .execute()
         )
+        if getattr(response, "error", None):
+            response = (
+                sb.table("users")
+                .select("username,is_admin,recovery_q,recovery_a,must_set_recovery,phone")
+                .or_(f"username.eq.{identifier},phone.eq.{identifier}")
+                .limit(1)
+                .execute()
+            )
         if not response.data:
             return None
         row = response.data[0]
         return {
             "username": row.get("username"),
             "is_admin": bool(row.get("is_admin")),
+            "role": _role_from_row(row),
             "recovery_q": row.get("recovery_q"),
             "recovery_a": row.get("recovery_a"),
             "must_set_recovery": bool(row.get("must_set_recovery")),
             "phone": row.get("phone")
         }
     conn = _conn(); c = conn.cursor()
-    c.execute("SELECT username,is_admin,recovery_q,recovery_a,must_set_recovery,phone FROM users WHERE username=? OR phone=?", (identifier, identifier))
+    c.execute("SELECT username,is_admin,role,recovery_q,recovery_a,must_set_recovery,phone FROM users WHERE username=? OR phone=?", (identifier, identifier))
     row = c.fetchone(); conn.close()
     if not row:
         return None
-    return {"username": row[0], "is_admin": bool(row[1]), "recovery_q": row[2], "recovery_a": row[3], "must_set_recovery": bool(row[4]), "phone": row[5]}
+    role_value = (row[2] or "").strip().lower() or ("admin" if row[1] else "user")
+    return {"username": row[0], "is_admin": bool(row[1]), "role": role_value, "recovery_q": row[3], "recovery_a": row[4], "must_set_recovery": bool(row[5]), "phone": row[6]}
 
 def list_users():
     if _use_supabase():
-        sb = _supabase()
-        response = sb.table("users").select("username,is_admin").execute()
-        return [{"username": r["username"], "is_admin": bool(r.get("is_admin"))} for r in response.data or []]
+        response = _supabase_select("users", "username,is_admin,role", "username,is_admin")
+        return [{
+            "username": r["username"],
+            "is_admin": bool(r.get("is_admin")),
+            "role": _role_from_row(r)
+        } for r in response.data or []]
     conn = _conn(); c = conn.cursor()
-    c.execute("SELECT username,is_admin FROM users")
-    users = [{"username": r[0], "is_admin": bool(r[1])} for r in c.fetchall()]
+    c.execute("SELECT username,is_admin,role FROM users")
+    users = [{
+        "username": r[0],
+        "is_admin": bool(r[1]),
+        "role": (r[2] or "").strip().lower() or ("admin" if r[1] else "user")
+    } for r in c.fetchall()]
     conn.close()
     return users
 
 def search_users(q):
     if _use_supabase():
-        sb = _supabase()
-        response = (
-            sb.table("users")
-            .select("username,is_admin")
-            .ilike("username", f"%{q}%")
-            .order("username")
-            .limit(200)
-            .execute()
-        )
-        return [{"username": r["username"], "is_admin": bool(r.get("is_admin"))} for r in response.data or []]
+        response = _supabase_select("users", "username,is_admin,role", "username,is_admin")
+        rows = response.data or []
+        rows = [r for r in rows if q.lower() in (r.get("username") or "").lower()]
+        return [{
+            "username": r["username"],
+            "is_admin": bool(r.get("is_admin")),
+            "role": _role_from_row(r)
+        } for r in rows][:200]
     conn = _conn(); c = conn.cursor()
-    c.execute("SELECT username,is_admin FROM users WHERE username LIKE ? ORDER BY username LIMIT 200", (f"%{q}%",))
-    users = [{"username": r[0], "is_admin": bool(r[1])} for r in c.fetchall()]
+    c.execute("SELECT username,is_admin,role FROM users WHERE username LIKE ? ORDER BY username LIMIT 200", (f"%{q}%",))
+    users = [{
+        "username": r[0],
+        "is_admin": bool(r[1]),
+        "role": (r[2] or "").strip().lower() or ("admin" if r[1] else "user")
+    } for r in c.fetchall()]
     conn.close()
     return users
 
@@ -409,6 +464,27 @@ def delete_user(username):
     changed = conn.total_changes
     conn.commit(); conn.close()
     return changed > 0
+
+def set_role(username, role):
+    if username == "ad":
+        role_value = "admin"
+    else:
+        role_value = (role or "user").strip().lower()
+    is_admin = 1 if role_value == "admin" else 0
+    if _use_supabase():
+        sb = _supabase()
+        response = (
+            sb.table("users")
+            .update({"role": role_value, "is_admin": is_admin})
+            .eq("username", username)
+            .execute()
+        )
+        return bool(response.data)
+    conn = _conn(); c = conn.cursor()
+    c.execute("UPDATE users SET role=?, is_admin=? WHERE username=?", (role_value, is_admin, username))
+    conn.commit(); ok = c.rowcount > 0
+    conn.close()
+    return ok
 
 def set_recovery(username, question, answer):
     if _use_supabase():
@@ -515,16 +591,20 @@ def get_history(username=None):
 def advanced_search_users(query, mode='fuzzy', fuzzy_threshold=75, limit=200, is_admin=None, case_sensitive=False):
     """
     mode: 'substring' | 'prefix' | 'tokens' | 'regex' | 'fuzzy'
-    Always returns list of dicts: {username, phone, is_admin, created_at, ...}
+    Always returns list of dicts: {username, phone, is_admin, role, created_at, ...}
     """
     if _use_supabase():
-        sb = _supabase()
         collate_query = query if case_sensitive else query.lower()
-        base_rows = sb.table("users").select("username,phone,is_admin,created_at").execute().data or []
+        base_rows = _supabase_select(
+            "users",
+            "username,phone,is_admin,role,created_at",
+            "username,phone,is_admin,created_at"
+        ).data or []
         users = [{
             "username": r.get("username"),
             "phone": r.get("phone"),
             "is_admin": bool(r.get("is_admin")),
+            "role": _role_from_row(r),
             "created_at": r.get("created_at")
         } for r in base_rows]
         if is_admin is not None:
@@ -594,14 +674,14 @@ def advanced_search_users(query, mode='fuzzy', fuzzy_threshold=75, limit=200, is
         if mode in ('substring', 'prefix', 'tokens'):
             if mode == 'substring':
                 pattern = f"%{query}%"
-                sql = "SELECT username,phone,is_admin,created_at FROM users WHERE (username LIKE ? OR phone LIKE ?)" + coll + " ORDER BY username LIMIT ?"
+                sql = "SELECT username,phone,is_admin,role,created_at FROM users WHERE (username LIKE ? OR phone LIKE ?)" + coll + " ORDER BY username LIMIT ?"
                 params = [pattern, pattern, limit]
                 if is_admin is not None:
                     sql = sql.replace(" LIMIT ?", " AND is_admin=? LIMIT ?")
                     params = [pattern, pattern, 1 if is_admin else 0, limit]
             elif mode == 'prefix':
                 pattern = f"{query}%"
-                sql = "SELECT username,phone,is_admin,created_at FROM users WHERE (username LIKE ? OR phone LIKE ?)" + coll + " ORDER BY username LIMIT ?"
+                sql = "SELECT username,phone,is_admin,role,created_at FROM users WHERE (username LIKE ? OR phone LIKE ?)" + coll + " ORDER BY username LIMIT ?"
                 params = [pattern, pattern, limit]
                 if is_admin is not None:
                     sql = sql.replace(" LIMIT ?", " AND is_admin=? LIMIT ?")
@@ -609,7 +689,7 @@ def advanced_search_users(query, mode='fuzzy', fuzzy_threshold=75, limit=200, is
             else:  # tokens (AND all tokens in username or phone)
                 tokens = [t for t in query.split() if t]
                 clauses = " AND ".join(["(username LIKE ? OR phone LIKE ?)" + coll] * len(tokens))
-                sql = f"SELECT username,phone,is_admin,created_at FROM users WHERE {clauses}"
+                sql = f"SELECT username,phone,is_admin,role,created_at FROM users WHERE {clauses}"
                 params = []
                 for t in tokens:
                     params.extend([f"%{t}%", f"%{t}%"])
@@ -620,12 +700,24 @@ def advanced_search_users(query, mode='fuzzy', fuzzy_threshold=75, limit=200, is
                 params.append(limit)
             c.execute(sql, params)
             rows = c.fetchall()
-            return [{"username": r[0], "phone": r[1], "is_admin": bool(r[2]), "created_at": r[3]} for r in rows]
+            return [{
+                "username": r[0],
+                "phone": r[1],
+                "is_admin": bool(r[2]),
+                "role": (r[3] or "").strip().lower() or ("admin" if r[2] else "user"),
+                "created_at": r[4]
+            } for r in rows]
 
         # For regex/fuzzy: fetch all users then filter in Python so we can match username or phone consistently
-        c.execute("SELECT username,phone,is_admin,created_at FROM users")
+        c.execute("SELECT username,phone,is_admin,role,created_at FROM users")
         all_rows = c.fetchall()
-        users = [{"username": r[0], "phone": r[1], "is_admin": bool(r[2]), "created_at": r[3]} for r in all_rows]
+        users = [{
+            "username": r[0],
+            "phone": r[1],
+            "is_admin": bool(r[2]),
+            "role": (r[3] or "").strip().lower() or ("admin" if r[2] else "user"),
+            "created_at": r[4]
+        } for r in all_rows]
         if is_admin is not None:
             users = [u for u in users if u["is_admin"] == bool(is_admin)]
 
@@ -663,12 +755,3 @@ def advanced_search_users(query, mode='fuzzy', fuzzy_threshold=75, limit=200, is
         return []
     finally:
         conn.close()
-
-
-
-
-
-
-
-
-

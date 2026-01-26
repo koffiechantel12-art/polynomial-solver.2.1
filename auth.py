@@ -42,8 +42,11 @@ def _supabase():
 
 def _supabase_insert(table, payload, fallback_payload=None):
     sb = _supabase()
-    response = sb.table(table).insert(payload).execute()
-    if getattr(response, "error", None) and fallback_payload:
+    try:
+        response = sb.table(table).insert(payload).execute()
+    except Exception:
+        response = None
+    if (response is None or getattr(response, "error", None)) and fallback_payload:
         response = sb.table(table).insert(fallback_payload).execute()
     return response
 
@@ -68,14 +71,16 @@ def init_db():
         sb = _supabase()
         admin_user = os.environ.get("ADMIN_USERNAME", "ad")
         admin_pw = os.environ.get("ADMIN_PASSWORD", "ad")
-        existing = (
-            sb.table("users")
-            .select("id,password,is_admin,role")
-            .eq("username", admin_user)
-            .limit(1)
-            .execute()
-        )
-        if getattr(existing, "error", None):
+        h = hashlib.sha256(admin_pw.encode('utf-8')).hexdigest()
+        try:
+            existing = (
+                sb.table("users")
+                .select("id,password,is_admin,role")
+                .eq("username", admin_user)
+                .limit(1)
+                .execute()
+            )
+        except Exception:
             existing = (
                 sb.table("users")
                 .select("id,password,is_admin")
@@ -83,7 +88,6 @@ def init_db():
                 .limit(1)
                 .execute()
             )
-        h = hashlib.sha256(admin_pw.encode('utf-8')).hexdigest()
         if not existing.data:
             now = datetime.utcnow().isoformat()
             payload = {
@@ -105,11 +109,17 @@ def init_db():
             row = existing.data[0]
             needs_reset = row.get("password") != h or not bool(row.get("is_admin")) or _role_from_row(row) != "admin"
             if needs_reset:
-                sb.table("users").update({
-                    "password": h,
-                    "is_admin": 1,
-                    "role": "admin"
-                }).eq("username", admin_user).execute()
+                try:
+                    sb.table("users").update({
+                        "password": h,
+                        "is_admin": 1,
+                        "role": "admin"
+                    }).eq("username", admin_user).execute()
+                except Exception:
+                    sb.table("users").update({
+                        "password": h,
+                        "is_admin": 1
+                    }).eq("username", admin_user).execute()
         return
 
     conn = _conn(); c = conn.cursor()
